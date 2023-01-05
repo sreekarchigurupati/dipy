@@ -20,13 +20,45 @@ class GlobalHorizon(object):
         self.slicer_curr_actor_y = None
         self.slicer_curr_actor_z = None
 
+
+        self.slicer_curr_x1 = None
+        self.slicer_curr_y1 = None
+        self.slicer_curr_z1 = None
+
+        self.slicer_curr_actor_x1 = None
+        self.slicer_curr_actor_y1 = None
+        self.slicer_curr_actor_z1 = None
+
+
+
+        self.slicer_curr_x2 = None
+        self.slicer_curr_y2 = None
+        self.slicer_curr_z2 = None
+
+        self.slicer_curr_actor_x2 = None
+        self.slicer_curr_actor_y2 = None
+        self.slicer_curr_actor_z2 = None
+
+
+
+
         self.slicer_orig_shape = None
         self.slicer_resliced_shape = None
 
         self.slicer_vol_idx = None
         self.slicer_vol = None
+        self.slicer_vol_idx1 = None
+        self.slicer_vol1 = None
+        self.slicer_vol_idx2 = None
+        self.slicer_vol2 = None
 
         self.slicer_peaks_actor_z = None
+
+        self.slicer_peaks_actor_z1 = None
+        self.slicer_peaks_actor_z2 = None
+
+
+
         self.slicer_rgb = False
 
         self.slicer_grid = False

@@ -547,14 +547,28 @@ class Horizon(object):
                                 self.world_coords, pam=pam, mem=self.mem)
                             first_img = False
             else:
-                data, affine = self.images[0]
+                if len(self.images) == 2:
+                    data1, affine1 = self.images[0]
+                    data2, affine2 = self.images[1]
+                    if np.allclose(affine1, affine2):
+                        # data = np.stack((data1, data2), axis=-1)
+                        affine = affine1
+                    else:
+                        raise ValueError('Affines do not match')
+                else:
+                    data, affine = self.images[0]   
                 self.vox2ras = affine
 
                 if len(self.pams) > 0:
                     pam = self.pams[0]
                 else:
                     pam = None
-                self.panel = slicer_panel(scene, self.show_m.iren, data,
+                if len(self.images) == 2:
+                    self.panel = slicer_panel(scene, self.show_m.iren, (data1, data2),
+                                              (affine1,affine2), self.world_coords,
+                                              pam=pam, mem=self.mem)
+                else:
+                    self.panel = slicer_panel(scene, self.show_m.iren, data,
                                           affine, self.world_coords, pam=pam,
                                           mem=self.mem)
         else:
