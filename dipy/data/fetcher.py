@@ -19,8 +19,11 @@ from dipy.core.gradients import (gradient_table,
                                  gradient_table_from_gradient_strength_bvecs)
 from dipy.io.gradients import read_bvals_bvecs
 from dipy.io.image import load_nifti, load_nifti_data, save_nifti
+
 from dipy.io.streamline import load_trk
-from dipy.utils.optpkg import optional_package
+
+from dipy.utils.optpkg import optional_package, TripWire
+
 
 
 from urllib.request import urlopen
@@ -137,6 +140,7 @@ def fetch_data(files, folder, data_size=None):
         value. The downloaded file is not deleted when this error is raised.
 
     """
+
     if not op.exists(folder):
         _log("Creating new folder %s" % folder)
         os.makedirs(folder)
@@ -287,6 +291,34 @@ fetch_resdnn_weights = _make_fetcher(
     ['resdnn_weights_mri_2018.h5'],
     ['f0e118d72ab804a464494bd9015227f4'],
     doc="Download ResDNN model weights for Nath et. al 2018")
+
+fetch_synb0_weights = _make_fetcher(
+    "fetch_synb0_weights",
+    pjoin(dipy_home, 'synb0'),
+    'https://ndownloader.figshare.com/files/',
+    ['36379914', '36379917', '36379920', '36379923', '36379926'],
+    ['synb0_default_weights1.h5',
+     'synb0_default_weights2.h5',
+     'synb0_default_weights3.h5',
+     'synb0_default_weights4.h5',
+     'synb0_default_weights5.h5'],
+    ['a9362c75bc28616167a11a42fe5d004e',
+     '9dc9353d6ff741d8e22b8569f157c56e',
+     'e548f341e4f12d63dfbed306233fddce',
+     '8cb7a3492d08e4c9b8938277d6fd9b75',
+     '5e796f892605b3bdb9cb9678f1c6ac11'],
+    doc="Download Synb0 model weights for Schilling et. al 2019")
+
+fetch_synb0_test = _make_fetcher(
+    "fetch_synb0_test",
+    pjoin(dipy_home, 'synb0'),
+    'https://ndownloader.figshare.com/files/',
+    ['36379911', '36671850'],
+    ['test_input_synb0.npz',
+     'test_output_synb0.npz'],
+    ['987203aa73de2dac8770f39ed506dc0c',
+     '515544fbcafd9769785502821b47b661'],
+    doc="Download Synb0 test data for Schilling et. al 2019")
 
 fetch_stanford_t1 = _make_fetcher(
     "fetch_stanford_t1",
@@ -779,6 +811,19 @@ def get_fnames(name='small_64D'):
         files, folder = fetch_resdnn_weights()
         wraw = pjoin(folder, 'resdnn_weights_mri_2018.h5')
         return wraw
+    if name == 'synb0_default_weights':
+        _, folder = fetch_synb0_weights()
+        w1 = pjoin(folder, 'synb0_default_weights1.h5')
+        w2 = pjoin(folder, 'synb0_default_weights2.h5')
+        w3 = pjoin(folder, 'synb0_default_weights3.h5')
+        w4 = pjoin(folder, 'synb0_default_weights4.h5')
+        w5 = pjoin(folder, 'synb0_default_weights5.h5')
+        return w1, w2, w3, w4, w5
+    if name == 'synb0_test_data':
+        files, folder = fetch_synb0_test()
+        input_array = pjoin(folder, 'test_input_synb0.npz')
+        target_array = pjoin(folder, 'test_output_synb0.npz')
+        return input_array, target_array
     if name == 'DiB_70_lte_pte_ste':
         _, folder = fetch_DiB_70_lte_pte_ste()
         fdata = pjoin(folder, 'DiB_70_lte_pte_ste.nii.gz')
@@ -1055,7 +1100,7 @@ def read_tissue_data(contrast='T1'):
 
     Parameters
     ----------
-    constrast : str
+    contrast : str
         'T1', 'T1 denoised' or 'Anisotropic Power'
 
     Returns
@@ -1742,22 +1787,19 @@ def fetch_hcp(subjects,
         subjects = [subjects]
 
     for subject in subjects:
-        # We make a single session folder per subject for this case, because
-        # AFQ api expects session structure:
         sub_dir = pjoin(base_dir, f'sub-{subject}')
-        sess_dir = pjoin(sub_dir, "ses-01")
         if not op.exists(sub_dir):
-            os.makedirs(pjoin(sess_dir, 'dwi'), exist_ok=True)
-            os.makedirs(pjoin(sess_dir, 'anat'), exist_ok=True)
-        data_files[pjoin(sess_dir, 'dwi', f'sub-{subject}_dwi.bval')] =\
+            os.makedirs(pjoin(sub_dir, 'dwi'), exist_ok=True)
+            os.makedirs(pjoin(sub_dir, 'anat'), exist_ok=True)
+        data_files[pjoin(sub_dir, 'dwi', f'sub-{subject}_dwi.bval')] =\
             f'{study}/{subject}/T1w/Diffusion/bvals'
-        data_files[pjoin(sess_dir, 'dwi', f'sub-{subject}_dwi.bvec')] =\
+        data_files[pjoin(sub_dir, 'dwi', f'sub-{subject}_dwi.bvec')] =\
             f'{study}/{subject}/T1w/Diffusion/bvecs'
-        data_files[pjoin(sess_dir, 'dwi', f'sub-{subject}_dwi.nii.gz')] =\
+        data_files[pjoin(sub_dir, 'dwi', f'sub-{subject}_dwi.nii.gz')] =\
             f'{study}/{subject}/T1w/Diffusion/data.nii.gz'
-        data_files[pjoin(sess_dir, 'anat', f'sub-{subject}_T1w.nii.gz')] =\
+        data_files[pjoin(sub_dir, 'anat', f'sub-{subject}_T1w.nii.gz')] =\
             f'{study}/{subject}/T1w/T1w_acpc_dc.nii.gz'
-        data_files[pjoin(sess_dir, 'anat',
+        data_files[pjoin(sub_dir, 'anat',
                            f'sub-{subject}_aparc+aseg_seg.nii.gz')] =\
             f'{study}/{subject}/T1w/aparc+aseg.nii.gz'
 
@@ -1786,3 +1828,114 @@ def fetch_hcp(subjects,
                            "PipelineDescription": {'Name': 'hcp_pipeline'}})
 
     return data_files, pjoin(my_path, study)
+
+
+def fetch_hbn(subjects, path=None):
+    """
+    Fetch preprocessed data from the Healthy Brain Network POD2 study [1, 2]_.
+
+    Parameters
+    ----------
+    subjects : list
+        Identifiers of the subjects to download.
+        For example: ["NDARAA948VFH", "NDAREK918EC2"].
+
+    path : string, optional
+        Path to save files into. Default: '~/.dipy'
+
+    Returns
+    -------
+    dict with remote and local names of these files,
+    path to BIDS derivative dataset
+
+    Notes
+    -----
+
+    .. [1] Alexander LM, Escalera J, Ai L, et al. An open resource for
+        transdiagnostic research in pediatric mental health and learning
+        disorders. Sci Data. 2017;4:170181.
+
+    .. [2] Richie-Halford A, Cieslak M, Ai L, et al. An analysis-ready and
+        quality controlled resource for pediatric brain white-matter research.
+        Scientific Data. 2022;9(1):1-27.
+
+    """
+
+    if has_boto3:
+        from botocore import UNSIGNED
+        from botocore.client import Config
+    else:
+        TripWire("The `fetch_hbn` function requires the boto3" +
+                 " library, but that is not installed.")
+
+    # Anonymous access:
+    client = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+
+    if path is None:
+        if not op.exists(dipy_home):
+            os.mkdir(dipy_home)
+        my_path = dipy_home
+    else:
+        my_path = path
+
+    base_dir = op.join(my_path, "HBN", 'derivatives', 'qsiprep')
+
+    if not os.path.exists(base_dir):
+        os.makedirs(base_dir, exist_ok=True)
+
+    data_files = {}
+
+    # If user provided incorrect input, these are typical failures that
+    # are easy to recover from:
+    if isinstance(subjects, int) or isinstance(subjects, str):
+        subjects = [subjects]
+
+    for subject in subjects:
+        initial_query = client.list_objects(
+            Bucket="fcp-indi",
+            Prefix=f"data/Projects/HBN/BIDS_curated/sub-{subject}/")
+        ses = initial_query.get('Contents', None)
+        if ses is None:
+            raise ValueError(f"Could not find data for subject {subject}")
+        else:
+            ses = ses[0]["Key"].split('/')[5]
+
+        query = client.list_objects(
+            Bucket="fcp-indi",
+            Prefix=f"data/Projects/HBN/BIDS_curated/derivatives/qsiprep/sub-{subject}/{ses}/")  # noqa
+        query_content = query.get('Contents', None)
+        if query_content is None:
+            raise ValueError(f"Could not find derivatives data for subject {subject}")
+        file_list = [kk["Key"] for kk in query["Contents"]]
+        sub_dir = op.join(base_dir, f'sub-{subject}')
+        ses_dir = op.join(sub_dir, ses)
+        if not os.path.exists(sub_dir):
+            os.makedirs(os.path.join(ses_dir, 'dwi'), exist_ok=True)
+            os.makedirs(os.path.join(ses_dir, 'anat'), exist_ok=True)
+        for remote in file_list:
+            full = remote.split("Projects")[-1][1:].replace("/BIDS_curated", "")
+            local = op.join(dipy_home, full)
+            data_files[local] = remote
+
+    download_files = {}
+    for k in data_files.keys():
+        if not op.exists(k):
+            download_files[k] = data_files[k]
+    if len(download_files.keys()):
+        with tqdm(total=len(download_files.keys())) as pbar:
+            for k in download_files.keys():
+                pbar.set_description_str(f"Downloading {k}")
+                client.download_file("fcp-indi", download_files[k], k)
+                pbar.update()
+
+    # Create the BIDS dataset description file text
+    to_bids_description(op.join(my_path, "HBN"),
+                        **{"Name": "HBN",
+                           "Subjects": subjects})
+
+    # Create the BIDS derivatives description file text
+    to_bids_description(base_dir,
+                        **{"Name": "HBN",
+                           "PipelineDescription": {'Name': 'qsiprep'}})
+
+    return data_files, pjoin(my_path, "HBN")

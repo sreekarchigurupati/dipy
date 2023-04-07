@@ -50,10 +50,13 @@ from dipy.data.fetcher import (get_fnames,
                                fetch_bundle_fa_hcp,
                                fetch_gold_standard_io,
                                fetch_resdnn_weights,
+                               fetch_synb0_weights,
+                               fetch_synb0_test,
                                read_qte_lte_pte,
                                read_DiB_70_lte_pte_ste,
                                read_DiB_217_lte_pte_ste,
-                               read_five_af_bundles)
+                               read_five_af_bundles,
+                               fetch_hbn)
 
 from ..utils.arrfuncs import as_native_array
 from dipy.io.image import load_nifti
