@@ -1081,16 +1081,35 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
     def get_map(self):
         """Return the resulting diffeomorphic map.
 
-        Returns the DiffeomorphicMap registering the moving image towards
-        the static image.
+        Returns the DiffeomorphicMap mapping points in the static image's grid
+        to points in the moving image's grid. Note: this is used to "deform"
+        the moving image "toward" the static image, which might be
+        counterintuitive.
 
         """
-        if not hasattr(self, 'static_to_ref'):
+        if not hasattr(self, 'static_to_moving'):
             msg = 'Diffeormorphic map can not be obtained without running '
             msg += 'the optimizer. Please call first '
             msg += 'SymmetricDiffeomorphicRegistration.optimize()'
             raise ValueError(msg)
-        return self.static_to_ref
+        return self.static_to_moving
+    
+    def get_intermediate_maps(self):
+        """Return the transforms mapping the input images toward the reference
+
+        Returns the DiffeomorphicMap objects mapping points in the static
+        and moving image's grids to points in the reference image's grid.
+        Note: this is used to "deform" the reference image (which is computed
+        iteratively by the optimization process) "toward" the static and moving
+        images, respectively, which might be counterintuitive.
+
+        """
+        if not (hasattr(self, 'static_to_ref') and hasattr(self, 'moving_to_ref')):
+            msg = 'Diffeormorphic map can not be obtained without running '
+            msg += 'the optimizer. Please call first '
+            msg += 'SymmetricDiffeomorphicRegistration.optimize()'
+            raise ValueError(msg)
+        return self.static_to_ref, self.moving_to_ref
 
     def _connect_functions(self):
         """Assign the methods to be called according to the image dimension
@@ -1530,11 +1549,11 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
                         % (stats[1], stats[2]))
 
         # Compose the two partial transformations
-        self.static_to_ref = self.moving_to_ref.warp_endomorphism(
+        self.static_to_moving = self.moving_to_ref.warp_endomorphism(
             self.static_to_ref.inverse()).inverse()
 
         # Report mean and std for the composed deformation field
-        residual, stats = self.static_to_ref.compute_inversion_error()
+        residual, stats = self.static_to_moving.compute_inversion_error()
         if self.verbosity >= VerbosityLevels.DIAGNOSE:
             logger.info('Final residual error: %0.6f (%0.6f)' % (stats[1],
                         stats[2]))
@@ -1570,12 +1589,12 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
 
         Returns
         -------
-        static_to_ref : DiffeomorphicMap object
+        static_to_moving : DiffeomorphicMap object
             the diffeomorphic map that brings the moving image towards the
             static one in the forward direction (i.e. by calling
-            static_to_ref.transform) and the static image towards the
+            static_to_moving.transform) and the static image towards the
             moving one in the backward direction (i.e. by calling
-            static_to_ref.transform_inverse).
+            static_to_moving.transform_inverse).
 
         """
         if self.verbosity >= VerbosityLevels.DEBUG:
@@ -1586,6 +1605,10 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
                              static_grid2world, moving_grid2world, prealign)
         self._optimize()
         self._end_optimizer()
+        self.static_to_moving.forward = np.array(self.static_to_moving.forward)
+        self.static_to_moving.backward = np.array(self.static_to_moving.backward)
         self.static_to_ref.forward = np.array(self.static_to_ref.forward)
         self.static_to_ref.backward = np.array(self.static_to_ref.backward)
-        return self.static_to_ref
+        self.moving_to_ref.forward = np.array(self.moving_to_ref.forward)
+        self.moving_to_ref.backward = np.array(self.moving_to_ref.backward)
+        return self.static_to_moving
