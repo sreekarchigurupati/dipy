@@ -13,6 +13,13 @@ from dipy.align import (
     sumsqdiff as ssd,
     vector_fields as vfu,
 )
+from dipy.align.parzenhist import (
+    ParzenJointHistogram,
+    compute_mi_demons_step_2d,
+    compute_mi_demons_step_3d,
+    compute_mi_force_dense_2d,
+    compute_mi_force_dense_3d,
+)
 from dipy.testing.decorators import warning_for_keywords
 
 
@@ -925,6 +932,223 @@ class SSDMetric(SimilarityMetric):
         Nothing to free for the SSD metric
         """
         pass
+
+
+class MIMetric(SimilarityMetric):
+    @warning_for_keywords()
+    def __init__(self, dim, *, nbins=32, sigma_diff=2.0):
+        r"""Mutual Information Similarity Metric
+
+        Similarity metric for (multi-modal) nonlinear image registration based
+        on Parzen-window estimation of Mutual Information. Uses the joint
+        histogram infrastructure from ``ParzenJointHistogram`` and computes
+        demons-style displacement updates weighted by the local MI gradient.
+
+        Parameters
+        ----------
+        dim : int (either 2 or 3)
+            the dimension of the image domain
+        nbins : int
+            number of histogram bins for the Parzen-window joint PDF
+        sigma_diff : float
+            standard deviation of the Gaussian smoothing kernel applied to
+            the update displacement field at each iteration
+        """
+        super(MIMetric, self).__init__(dim)
+        self.nbins = nbins
+        self.sigma_diff = sigma_diff
+        self._connect_functions()
+
+    def _connect_functions(self):
+        r"""Assign the methods to be called according to the image dimension"""
+        if self.dim == 2:
+            self.reorient_vector_field = vfu.reorient_vector_field_2d
+        elif self.dim == 3:
+            self.reorient_vector_field = vfu.reorient_vector_field_3d
+        else:
+            raise ValueError(f"MI Metric not defined for dim. {self.dim}")
+
+    def _compute_mi_forces(self, static, moving):
+        r"""Compute per-voxel MI-based force and energy using Cython.
+
+        Uses the Parzen-window joint histogram to:
+        1. Compute the MI value
+        2. Compute the conditional mean E[moving | static] for each voxel,
+           yielding a "predicted moving" image
+        3. Return the residual (predicted_moving - actual_moving) as the
+           per-voxel force, similar to the EM metric approach
+
+        This conditional-expectation approach naturally handles multi-modal
+        images by mapping static intensities to expected moving intensities
+        through the joint histogram.
+
+        Parameters
+        ----------
+        static : array, shape (R, C) or (S, R, C)
+        moving : array, shape (R, C) or (S, R, C)
+
+        Returns
+        -------
+        delta_field : array, same shape as static
+            per-voxel residual (predicted_moving - actual_moving)
+        mi_value : float
+            global mutual information value
+        """
+        # Cast to float64 for Parzen histogram (Cython expects double)
+        static_f64 = np.asarray(static, dtype=np.float64)
+        moving_f64 = np.asarray(moving, dtype=np.float64)
+
+        hist = ParzenJointHistogram(self.nbins)
+        hist.setup(static_f64, moving_f64)
+        hist.update_pdfs_dense(static_f64, moving_f64)
+
+        joint = np.asarray(hist.joint)
+        smarginal = np.asarray(hist.smarginal)
+        mmarginal = np.asarray(hist.mmarginal)
+
+        # Use Cython for the force computation
+        if self.dim == 2:
+            delta_field, mi_value = compute_mi_force_dense_2d(
+                static_f64,
+                moving_f64,
+                joint,
+                smarginal,
+                mmarginal,
+                hist.smin,
+                hist.sdelta,
+                hist.mmin,
+                hist.mdelta,
+                self.nbins,
+                hist.padding,
+            )
+        else:
+            delta_field, mi_value = compute_mi_force_dense_3d(
+                static_f64,
+                moving_f64,
+                joint,
+                smarginal,
+                mmarginal,
+                hist.smin,
+                hist.sdelta,
+                hist.mmin,
+                hist.mdelta,
+                self.nbins,
+                hist.padding,
+            )
+
+        return np.asarray(delta_field, dtype=floating), mi_value
+
+    def initialize_iteration(self):
+        r"""Prepares the metric to compute one displacement field iteration.
+
+        Builds the Parzen-window joint histogram and computes per-voxel
+        residuals using the conditional expectation approach. Also
+        pre-computes image gradients in physical space.
+        """
+        # Compute delta fields (predicted - actual) and MI value
+        self.delta_forward, self.energy = self._compute_mi_forces(
+            self.static_image, self.moving_image
+        )
+        self.delta_backward, _ = self._compute_mi_forces(
+            self.moving_image, self.static_image
+        )
+
+        # Compute image gradients
+        self.gradient_moving = np.empty(
+            shape=self.moving_image.shape + (self.dim,), dtype=floating
+        )
+        for i, grad in enumerate(gradient(self.moving_image)):
+            self.gradient_moving[..., i] = grad
+
+        if self.moving_spacing is not None:
+            self.gradient_moving /= self.moving_spacing
+        if self.moving_direction is not None:
+            self.reorient_vector_field(self.gradient_moving, self.moving_direction)
+
+        self.gradient_static = np.empty(
+            shape=self.static_image.shape + (self.dim,), dtype=floating
+        )
+        for i, grad in enumerate(gradient(self.static_image)):
+            self.gradient_static[..., i] = grad
+
+        if self.static_spacing is not None:
+            self.gradient_static /= self.static_spacing
+        if self.static_direction is not None:
+            self.reorient_vector_field(self.gradient_static, self.static_direction)
+
+    def free_iteration(self):
+        r"""Frees the resources allocated during initialization"""
+        del self.delta_forward
+        del self.delta_backward
+        del self.gradient_moving
+        del self.gradient_static
+
+    def compute_forward(self):
+        r"""Computes one step bringing the moving image towards the static.
+
+        Uses a Cython demons-style update: the displacement is the product of
+        the residual field (conditional expectation minus actual intensity) and
+        the image gradient, regularized and smoothed with a Gaussian kernel.
+        """
+        sigma_reg_2 = float(
+            np.sum(self.static_spacing**2) / self.dim
+            if self.static_spacing is not None
+            else 1.0
+        )
+
+        # Cython demons step (fused loop, avoids intermediate arrays)
+        gradient_f64 = np.asarray(self.gradient_static, dtype=np.float64)
+        delta_f64 = np.asarray(self.delta_forward, dtype=np.float64)
+        if self.dim == 2:
+            step, self.energy_ssd = compute_mi_demons_step_2d(
+                delta_f64, gradient_f64, sigma_reg_2
+            )
+        else:
+            step, self.energy_ssd = compute_mi_demons_step_3d(
+                delta_f64, gradient_f64, sigma_reg_2
+            )
+
+        displacement = np.asarray(step, dtype=floating)
+        for i in range(self.dim):
+            displacement[..., i] = ndimage.gaussian_filter(
+                displacement[..., i], self.sigma_diff
+            )
+        return displacement
+
+    def compute_backward(self):
+        r"""Computes one step bringing the static image towards the moving.
+
+        Uses a Cython demons-style update analogous to compute_forward but in
+        the backward direction.
+        """
+        sigma_reg_2 = float(
+            np.sum(self.moving_spacing**2) / self.dim
+            if self.moving_spacing is not None
+            else 1.0
+        )
+
+        gradient_f64 = np.asarray(self.gradient_moving, dtype=np.float64)
+        delta_f64 = np.asarray(self.delta_backward, dtype=np.float64)
+        if self.dim == 2:
+            step, _ = compute_mi_demons_step_2d(delta_f64, gradient_f64, sigma_reg_2)
+        else:
+            step, _ = compute_mi_demons_step_3d(delta_f64, gradient_f64, sigma_reg_2)
+
+        displacement = np.asarray(step, dtype=floating)
+        for i in range(self.dim):
+            displacement[..., i] = ndimage.gaussian_filter(
+                displacement[..., i], self.sigma_diff
+            )
+        return displacement
+
+    def get_energy(self):
+        r"""Numerical value assigned by this metric to the current image pair
+
+        Returns the negative Mutual Information value computed during the
+        last iteration (negative so that the optimizer, which minimizes,
+        effectively maximizes MI).
+        """
+        return -self.energy
 
 
 @warning_for_keywords()

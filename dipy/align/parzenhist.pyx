@@ -1366,3 +1366,304 @@ def sample_domain_regular(int k, int[:] shape, double[:, :] grid2world,
                 samples[i, 1] = _apply_affine_3d_x1(s, r, c, 1, grid2world)
                 samples[i, 2] = _apply_affine_3d_x2(s, r, c, 1, grid2world)
     return np.asarray(samples)
+
+
+def compute_mi_force_dense_2d(double[:, :] static, double[:, :] moving,
+                               double[:, :] joint, double[:] smarginal,
+                               double[:] mmarginal, double smin,
+                               double sdelta, double mmin, double mdelta,
+                               int nbins, int padding):
+    r""" Compute MI value and per-voxel residual for 2D demons registration.
+
+    Computes the conditional expectation E[moving | static] for each voxel
+    and returns the residual (predicted_moving - actual_moving) as the driving
+    force for a demons-style displacement update.
+
+    Parameters
+    ----------
+    static : array, shape (R, C)
+        the static image (float64)
+    moving : array, shape (R, C)
+        the moving image (float64)
+    joint : array, shape (nbins, nbins)
+        joint probability density function
+    smarginal : array, shape (nbins,)
+        marginal PDF of the static image
+    mmarginal : array, shape (nbins,)
+        marginal PDF of the moving image
+    smin : double
+        minimum normalized static intensity
+    sdelta : double
+        static intensity bin width
+    mmin : double
+        minimum normalized moving intensity
+    mdelta : double
+        moving intensity bin width
+    nbins : int
+        number of histogram bins
+    padding : int
+        histogram padding
+
+    Returns
+    -------
+    delta_field : array, shape (R, C)
+        per-voxel residual (predicted_moving - actual_moving)
+    mi_value : double
+        mutual information value
+    """
+    cdef:
+        cnp.npy_intp nr = static.shape[0]
+        cnp.npy_intp nc = static.shape[1]
+        cnp.npy_intp i, j, si, mi_idx
+        double epsilon = 2.2204460492503131e-016
+        double mi_value = 0.0
+        double snorm, predicted
+        double[:] cond_mean
+        double[:] bin_centers
+        double[:, :] delta
+
+    # Compute conditional mean E[moving | static_bin = i]
+    cond_mean = np.zeros(nbins, dtype=np.float64)
+    bin_centers = np.zeros(nbins, dtype=np.float64)
+    with nogil:
+        for j in range(nbins):
+            bin_centers[j] = (j + mmin) * mdelta
+        for i in range(nbins):
+            if smarginal[i] > epsilon:
+                for j in range(nbins):
+                    cond_mean[i] = cond_mean[i] + joint[i, j] * bin_centers[j]
+                cond_mean[i] = cond_mean[i] / smarginal[i]
+
+    # Compute MI value
+    with nogil:
+        for i in range(nbins):
+            for j in range(nbins):
+                if joint[i, j] > epsilon and smarginal[i] > epsilon and \
+                   mmarginal[j] > epsilon:
+                    mi_value += joint[i, j] * log(
+                        joint[i, j] / (smarginal[i] * mmarginal[j])
+                    )
+
+    # Compute per-voxel residual
+    delta = np.zeros((nr, nc), dtype=np.float64)
+    with nogil:
+        for i in range(nr):
+            for j in range(nc):
+                if sdelta != 0:
+                    snorm = (static[i, j] / sdelta) - smin
+                else:
+                    snorm = 0.0
+                # Clip to valid bin range
+                if snorm < padding:
+                    snorm = padding
+                elif snorm > nbins - padding - 1:
+                    snorm = nbins - padding - 1
+                si = <cnp.npy_intp>snorm
+                if si < 0:
+                    si = 0
+                elif si >= nbins:
+                    si = nbins - 1
+                delta[i, j] = cond_mean[si] - moving[i, j]
+
+    return np.asarray(delta), mi_value
+
+
+def compute_mi_force_dense_3d(double[:, :, :] static, double[:, :, :] moving,
+                               double[:, :] joint, double[:] smarginal,
+                               double[:] mmarginal, double smin,
+                               double sdelta, double mmin, double mdelta,
+                               int nbins, int padding):
+    r""" Compute MI value and per-voxel residual for 3D demons registration.
+
+    Computes the conditional expectation E[moving | static] for each voxel
+    and returns the residual (predicted_moving - actual_moving) as the driving
+    force for a demons-style displacement update.
+
+    Parameters
+    ----------
+    static : array, shape (S, R, C)
+        the static image (float64)
+    moving : array, shape (S, R, C)
+        the moving image (float64)
+    joint : array, shape (nbins, nbins)
+        joint probability density function
+    smarginal : array, shape (nbins,)
+        marginal PDF of the static image
+    mmarginal : array, shape (nbins,)
+        marginal PDF of the moving image
+    smin : double
+        minimum normalized static intensity
+    sdelta : double
+        static intensity bin width
+    mmin : double
+        minimum normalized moving intensity
+    mdelta : double
+        moving intensity bin width
+    nbins : int
+        number of histogram bins
+    padding : int
+        histogram padding
+
+    Returns
+    -------
+    delta_field : array, shape (S, R, C)
+        per-voxel residual (predicted_moving - actual_moving)
+    mi_value : double
+        mutual information value
+    """
+    cdef:
+        cnp.npy_intp ns = static.shape[0]
+        cnp.npy_intp nr = static.shape[1]
+        cnp.npy_intp nc = static.shape[2]
+        cnp.npy_intp i, j, k, si
+        double epsilon = 2.2204460492503131e-016
+        double mi_value = 0.0
+        double snorm
+        double[:] cond_mean
+        double[:] bin_centers
+        double[:, :, :] delta
+
+    # Compute conditional mean E[moving | static_bin = i]
+    cond_mean = np.zeros(nbins, dtype=np.float64)
+    bin_centers = np.zeros(nbins, dtype=np.float64)
+    with nogil:
+        for j in range(nbins):
+            bin_centers[j] = (j + mmin) * mdelta
+        for i in range(nbins):
+            if smarginal[i] > epsilon:
+                for j in range(nbins):
+                    cond_mean[i] = cond_mean[i] + joint[i, j] * bin_centers[j]
+                cond_mean[i] = cond_mean[i] / smarginal[i]
+
+    # Compute MI value
+    with nogil:
+        for i in range(nbins):
+            for j in range(nbins):
+                if joint[i, j] > epsilon and smarginal[i] > epsilon and \
+                   mmarginal[j] > epsilon:
+                    mi_value += joint[i, j] * log(
+                        joint[i, j] / (smarginal[i] * mmarginal[j])
+                    )
+
+    # Compute per-voxel residual
+    delta = np.zeros((ns, nr, nc), dtype=np.float64)
+    with nogil:
+        for i in range(ns):
+            for j in range(nr):
+                for k in range(nc):
+                    if sdelta != 0:
+                        snorm = (static[i, j, k] / sdelta) - smin
+                    else:
+                        snorm = 0.0
+                    if snorm < padding:
+                        snorm = padding
+                    elif snorm > nbins - padding - 1:
+                        snorm = nbins - padding - 1
+                    si = <cnp.npy_intp>snorm
+                    if si < 0:
+                        si = 0
+                    elif si >= nbins:
+                        si = nbins - 1
+                    delta[i, j, k] = cond_mean[si] - moving[i, j, k]
+
+    return np.asarray(delta), mi_value
+
+
+def compute_mi_demons_step_2d(double[:, :] delta_field,
+                               double[:, :, :] gradient_field,
+                               double sigma_reg_2):
+    r""" Compute demons-style displacement from MI residual, 2D.
+
+    Parameters
+    ----------
+    delta_field : array, shape (R, C)
+        per-voxel residual (predicted - actual)
+    gradient_field : array, shape (R, C, 2)
+        image gradient
+    sigma_reg_2 : double
+        regularization parameter (sum of squared spacings / dim)
+
+    Returns
+    -------
+    displacement : array, shape (R, C, 2)
+        the demons displacement step
+    energy : double
+        sum of squared residuals
+    """
+    cdef:
+        cnp.npy_intp nr = delta_field.shape[0]
+        cnp.npy_intp nc = delta_field.shape[1]
+        cnp.npy_intp i, j
+        double grad_sq, denom, d, energy
+        double[:, :, :] displacement
+
+    displacement = np.zeros((nr, nc, 2), dtype=np.float64)
+    energy = 0.0
+    with nogil:
+        for i in range(nr):
+            for j in range(nc):
+                d = delta_field[i, j]
+                energy += d * d
+                grad_sq = (gradient_field[i, j, 0] * gradient_field[i, j, 0] +
+                           gradient_field[i, j, 1] * gradient_field[i, j, 1])
+                denom = grad_sq + d * d / sigma_reg_2
+                if denom > 0:
+                    displacement[i, j, 0] = d * gradient_field[i, j, 0] / denom
+                    displacement[i, j, 1] = d * gradient_field[i, j, 1] / denom
+
+    return np.asarray(displacement), energy
+
+
+def compute_mi_demons_step_3d(double[:, :, :] delta_field,
+                               double[:, :, :, :] gradient_field,
+                               double sigma_reg_2):
+    r""" Compute demons-style displacement from MI residual, 3D.
+
+    Parameters
+    ----------
+    delta_field : array, shape (S, R, C)
+        per-voxel residual (predicted - actual)
+    gradient_field : array, shape (S, R, C, 3)
+        image gradient
+    sigma_reg_2 : double
+        regularization parameter (sum of squared spacings / dim)
+
+    Returns
+    -------
+    displacement : array, shape (S, R, C, 3)
+        the demons displacement step
+    energy : double
+        sum of squared residuals
+    """
+    cdef:
+        cnp.npy_intp ns = delta_field.shape[0]
+        cnp.npy_intp nr = delta_field.shape[1]
+        cnp.npy_intp nc = delta_field.shape[2]
+        cnp.npy_intp i, j, k
+        double grad_sq, denom, d, energy
+        double[:, :, :, :] displacement
+
+    displacement = np.zeros((ns, nr, nc, 3), dtype=np.float64)
+    energy = 0.0
+    with nogil:
+        for i in range(ns):
+            for j in range(nr):
+                for k in range(nc):
+                    d = delta_field[i, j, k]
+                    energy += d * d
+                    grad_sq = (gradient_field[i, j, k, 0] *
+                               gradient_field[i, j, k, 0] +
+                               gradient_field[i, j, k, 1] *
+                               gradient_field[i, j, k, 1] +
+                               gradient_field[i, j, k, 2] *
+                               gradient_field[i, j, k, 2])
+                    denom = grad_sq + d * d / sigma_reg_2
+                    if denom > 0:
+                        displacement[i, j, k, 0] = (d *
+                            gradient_field[i, j, k, 0] / denom)
+                        displacement[i, j, k, 1] = (d *
+                            gradient_field[i, j, k, 1] / denom)
+                        displacement[i, j, k, 2] = (d *
+                            gradient_field[i, j, k, 2] / denom)
+
+    return np.asarray(displacement), energy

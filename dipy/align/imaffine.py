@@ -56,12 +56,36 @@ from dipy.core.optimize import Optimizer
 from dipy.testing.decorators import warning_for_keywords
 from dipy.utils.logging import logger
 
+
+def _transform_3d_affine_scipy(volume, ref_shape, affine):
+    """Fast 3D affine transform using scipy.ndimage (pull resampling).
+
+    Maps output coords to input coords via affine; order=1 gives trilinear.
+    Same convention as vf.transform_3d_affine for drop-in replacement.
+    Typically faster than the Cython implementation for typical volumes.
+    """
+    comp = np.asarray(affine, dtype=np.float64)
+    matrix = comp[:3, :3]
+    offset = comp[:3, 3]
+    vol = np.asarray(volume, dtype=np.float64, copy=False)
+    return ndimage.affine_transform(
+        vol,
+        matrix,
+        offset=offset,
+        output_shape=tuple(ref_shape),
+        order=1,
+        mode="constant",
+        cval=0.0,
+    )
+
+
 _interp_options = ["nearest", "linear"]
 _transform_method = {}
 _transform_method[(2, "nearest")] = vf.transform_2d_affine_nn
 _transform_method[(3, "nearest")] = vf.transform_3d_affine_nn
 _transform_method[(2, "linear")] = vf.transform_2d_affine
-_transform_method[(3, "linear")] = vf.transform_3d_affine
+# Use scipy.ndimage for 3D linear: faster than Cython for typical volumes
+_transform_method[(3, "linear")] = _transform_3d_affine_scipy
 _number_dim_affine_matrix = 2
 
 

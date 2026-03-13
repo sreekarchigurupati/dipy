@@ -6,6 +6,7 @@ import nibabel as nib
 from nibabel.streamlines import ArraySequence as Streamlines
 import numpy as np
 import numpy.linalg as npl
+from scipy.ndimage import gaussian_filter
 
 from dipy.align import Bunch, VerbosityLevels, floating, vector_fields as vfu
 from dipy.align.scalespace import ScaleSpace
@@ -1117,6 +1118,7 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
         inv_iter=20,
         inv_tol=1e-3,
         callback=None,
+        field_sigma=None,
     ):
         """Symmetric Diffeomorphic Registration (SyN) Algorithm
 
@@ -1151,6 +1153,13 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
             a function receiving a SymmetricDiffeomorphicRegistration object
             to be called after each iteration (this optimizer will call this
             function passing self as parameter)
+        field_sigma : float, optional
+            standard deviation of the Gaussian smoothing kernel applied to the
+            total displacement field after each iteration. This regularizes the
+            accumulated deformation, analogous to velocity field smoothing
+            variance. If None
+            (default), no total field smoothing is applied, preserving the
+            original behavior.
         """
         super(SymmetricDiffeomorphicRegistration, self).__init__(metric=metric)
         if level_iters is None:
@@ -1170,6 +1179,7 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
         self.full_energy_profile = []
         self.verbosity = VerbosityLevels.STATUS
         self.callback = callback
+        self.field_sigma = field_sigma
         self.moving_ss = None
         self.static_ss = None
         self.static_direction = None
@@ -1560,6 +1570,12 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
 
         self.energy_list.append(fw_energy + bw_energy)
 
+        # Smooth the total displacement fields if field_sigma is set.
+        # This regularizes the accumulated deformation
+        if self.field_sigma is not None and self.field_sigma > 0:
+            self.static_to_ref.forward = self._smooth_field(self.static_to_ref.forward)
+            self.moving_to_ref.forward = self._smooth_field(self.moving_to_ref.forward)
+
         self.__invert_models(current_disp_world2grid, current_disp_spacing)
 
         # Free resources no longer needed to compute the forward and backward
@@ -1591,6 +1607,27 @@ class SymmetricDiffeomorphicRegistration(DiffeomorphicRegistration):
             step[:, :, 0, ...] = 0
             step[:, :, -1, ...] = 0
         return step
+
+    def _smooth_field(self, field):
+        """Apply Gaussian smoothing to a displacement field.
+
+        Smooths each component of the displacement field independently using
+        a Gaussian kernel with standard deviation ``self.field_sigma``.
+
+        Parameters
+        ----------
+        field : array, shape (..., dim)
+            the displacement field to be smoothed
+
+        Returns
+        -------
+        smoothed : array, shape (..., dim)
+            the smoothed displacement field
+        """
+        smoothed = np.empty_like(field)
+        for i in range(self.dim):
+            smoothed[..., i] = gaussian_filter(field[..., i], self.field_sigma)
+        return smoothed
 
     def __invert_models(self, current_disp_world2grid, current_disp_spacing):
         """Converting static - moving models in both direction.

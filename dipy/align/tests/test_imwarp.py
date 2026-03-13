@@ -1208,3 +1208,185 @@ def test_coordinate_mapping(rng):
             )
 
             assert_array_almost_equal(wpoints, wpoints_2[0])
+
+
+def test_field_sigma_smoothing_2d():
+    r"""Test 2D SyN with field_sigma total displacement field smoothing.
+
+    Verifies that the field_sigma parameter (total displacement field
+    regularization) produces a valid registration and that the resulting
+    deformation is smoother than without field_sigma.
+    """
+    fname = get_fnames(name="t1_coronal_slice")
+    nslices = 1
+    b = 0.1
+    m = 4
+
+    image = np.load(fname)
+    moving, static = get_warped_stacked_image(image, nslices, b, m)
+
+    # Configure the metric
+    sigma_diff = 3.0
+    radius = 4
+    metric = metrics.CCMetric(2, sigma_diff=sigma_diff, radius=radius)
+
+    # Run with field_sigma=3.0 (ANTs-like total field smoothing)
+    level_iters = [25, 10]
+    optimizer = imwarp.SymmetricDiffeomorphicRegistration(
+        metric=metric, level_iters=level_iters, field_sigma=3.0
+    )
+    optimizer.verbosity = VerbosityLevels.DEBUG
+    mapping = optimizer.optimize(static, moving, static_grid2world=None)
+
+    warped = mapping.transform(moving)
+    starting_energy = np.sum((static - moving) ** 2)
+    final_energy = np.sum((static - warped) ** 2)
+    reduced = 1.0 - final_energy / starting_energy
+
+    # Should still achieve reasonable registration quality (smoothing trades
+    # local accuracy for global regularity)
+    assert reduced > 0.6
+
+    # Run without field_sigma for comparison
+    metric2 = metrics.CCMetric(2, sigma_diff=sigma_diff, radius=radius)
+    optimizer2 = imwarp.SymmetricDiffeomorphicRegistration(
+        metric=metric2, level_iters=level_iters
+    )
+    optimizer2.verbosity = VerbosityLevels.DEBUG
+    mapping2 = optimizer2.optimize(static, moving, static_grid2world=None)
+
+    # Compute deformation field smoothness (Laplacian magnitude)
+    # The field_sigma version should have a smoother deformation field
+    fwd1 = mapping.forward
+    fwd2 = mapping2.forward
+
+    def laplacian_magnitude(field):
+        lap = 0.0
+        for i in range(field.shape[-1]):
+            comp = field[..., i]
+            lap += np.sum(np.diff(comp, n=2, axis=0) ** 2)
+            lap += np.sum(np.diff(comp, n=2, axis=1) ** 2)
+        return lap
+
+    smooth_lap = laplacian_magnitude(fwd1)
+    unsmooth_lap = laplacian_magnitude(fwd2)
+
+    # field_sigma version should be smoother (lower Laplacian)
+    assert smooth_lap < unsmooth_lap
+
+
+def test_field_sigma_smoothing_3d():
+    r"""Test 3D SyN with field_sigma total displacement field smoothing.
+
+    Verifies that field_sigma works correctly in 3D.
+    """
+    fname = get_fnames(name="t1_coronal_slice")
+    nslices = 21
+    b = 0.1
+    m = 4
+
+    image = np.load(fname)
+    moving, static = get_warped_stacked_image(image, nslices, b, m)
+
+    # Create the CC metric
+    sigma_diff = 2.0
+    radius = 2
+    similarity_metric = metrics.CCMetric(3, sigma_diff=sigma_diff, radius=radius)
+
+    # Create the optimizer with field_sigma (use moderate sigma for 3D)
+    level_iters = [30, 10]
+    optimizer = imwarp.SymmetricDiffeomorphicRegistration(
+        similarity_metric,
+        level_iters=level_iters,
+        field_sigma=1.5,
+    )
+    optimizer.verbosity = VerbosityLevels.DEBUG
+    mapping = optimizer.optimize(static, moving, static_grid2world=None)
+
+    warped = mapping.transform(moving)
+    starting_energy = np.sum((static - moving) ** 2)
+    final_energy = np.sum((static - warped) ** 2)
+    reduced = 1.0 - final_energy / starting_energy
+
+    # Should still achieve reasonable registration quality
+    assert reduced > 0.5
+
+
+def test_mi_2d():
+    r"""Test 2D SyN with MI metric
+
+    Register a coronal slice from a T1w brain MRI before and after warping
+    it under a synthetic invertible map. We verify that the final
+    registration is of good quality.
+    """
+    fname = get_fnames(name="t1_coronal_slice")
+    nslices = 1
+    b = 0.1
+    m = 4
+
+    image = np.load(fname)
+    moving, static = get_warped_stacked_image(image, nslices, b, m)
+
+    # Configure the metric
+    metric = metrics.MIMetric(2, nbins=32, sigma_diff=3.0)
+
+    # Configure and run the Optimizer
+    level_iters = [20, 10]
+    optimizer = imwarp.SymmetricDiffeomorphicRegistration(
+        metric=metric, level_iters=level_iters
+    )
+    optimizer.verbosity = VerbosityLevels.DEBUG
+    mapping = optimizer.optimize(static, moving, static_grid2world=None)
+    m = optimizer.get_map()
+    assert_equal(mapping, m)
+
+    warped = mapping.transform(moving)
+    starting_energy = np.sum((static - moving) ** 2)
+    final_energy = np.sum((static - warped) ** 2)
+    reduced = 1.0 - final_energy / starting_energy
+
+    assert reduced > 0.9
+
+
+def test_mi_3d():
+    r"""Test 3D SyN with MI metric
+
+    Register a volume created by stacking copies of a coronal slice from
+    a T1w brain MRI before and after warping it under a synthetic
+    invertible map. We verify that the final registration is of good
+    quality.
+    """
+    fname = get_fnames(name="t1_coronal_slice")
+    nslices = 21
+    b = 0.1
+    m = 4
+
+    image = np.load(fname)
+    moving, static = get_warped_stacked_image(image, nslices, b, m)
+
+    # Create the MI metric
+    metric = metrics.MIMetric(3, nbins=32, sigma_diff=2.0)
+
+    # Create the optimizer
+    level_iters = [20, 10]
+    optimizer = imwarp.SymmetricDiffeomorphicRegistration(
+        metric,
+        level_iters=level_iters,
+        step_length=0.25,
+        ss_sigma_factor=0.2,
+        opt_tol=1e-4,
+        inv_iter=20,
+        inv_tol=1e-3,
+    )
+    optimizer.verbosity = VerbosityLevels.DEBUG
+
+    mapping = optimizer.optimize(
+        static, moving, static_grid2world=None, moving_grid2world=None, prealign=None
+    )
+
+    warped = mapping.transform(moving)
+    starting_energy = np.sum((static - moving) ** 2)
+    final_energy = np.sum((static - warped) ** 2)
+    reduced = 1.0 - final_energy / starting_energy
+
+    assert reduced > 0.9
