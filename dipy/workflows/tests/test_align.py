@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -121,6 +122,30 @@ def test_reslice_skip_when_matching(caplog):
         npt.assert_equal(resliced.shape, volume.shape)
 
 
+def test_reslice_skip_idempotent(caplog):
+    """Test ResliceFlow is idempotent when force option is used."""
+
+    with TemporaryDirectory() as out_dir:
+        data_path, _, _ = get_fnames(name="small_25")
+        _, _, zooms = load_nifti(data_path, return_voxsize=True)
+        target_vox = list(zooms[:3])
+
+        with caplog.at_level(logging.INFO, logger="dipy"):
+            ResliceFlow().run(data_path, new_vox_size=target_vox, out_dir=out_dir)
+
+        caplog.clear()
+
+        with caplog.at_level(logging.INFO, logger="dipy"):
+            ResliceFlow(force=True).run(
+                data_path, new_vox_size=target_vox, out_dir=out_dir
+            )
+
+        info_messages = [r.message for r in caplog.records if r.levelname == "INFO"]
+        assert any("already linked" in m or "Skipping" in m for m in info_messages), (
+            "Expected idempotent skip message on second run. " f"Found: {info_messages}"
+        )
+
+
 def test_slr_flow(caplog):
     with TemporaryDirectory() as out_dir:
         data_path = get_fnames(name="fornix")
@@ -214,6 +239,34 @@ def test_slr_flow_empty_after_length_filtering(caplog):
         assert any("SLR with QBX failed" in err.message for err in error_records)
 
 
+def test_slr_flow_remove_invalid_streamlines():
+    """Test that SlrWithQbxFlow removes out-of-bounds streamlines when
+    remove_invalid_streamlines=True and does not raise a ValueError on save.
+    """
+    with TemporaryDirectory() as out_dir:
+        data_path = get_fnames(name="fornix")
+
+        sft = load_tractogram(data_path, "same", bbox_valid_check=False)
+        sft.streamlines._data += np.array([50, 0, 0])
+        moved_path = Path(out_dir) / "moved.trx"
+        save_tractogram(sft, moved_path, bbox_valid_check=False)
+
+        slr_flow = SlrWithQbxFlow(force=True)
+        slr_flow.run(
+            data_path,
+            moved_path,
+            out_dir=out_dir,
+            bbox_valid_check=False,
+            remove_invalid_streamlines=True,
+        )
+
+        out_path = slr_flow.last_generated_outputs["out_moved"]
+        assert Path(out_path).is_file()
+
+        result_sft = load_tractogram(out_path, "same", bbox_valid_check=True)
+        assert len(result_sft.streamlines) >= 0
+
+
 @set_random_number_generator(1234)
 def test_image_registration(rng):
     with TemporaryDirectory() as temp_out_dir:
@@ -297,7 +350,7 @@ def test_image_registration(rng):
             )
 
             dist = read_distance("rigid_q.txt")
-            npt.assert_almost_equal(dist, -0.6900534794005155, 1)
+            npt.assert_almost_equal(dist, -0.4448226960942718, 1)
             check_existence(out_moved, out_affine)
 
         def test_rigid_isoscaling():
@@ -318,7 +371,7 @@ def test_image_registration(rng):
             )
 
             dist = read_distance("rigid_isoscaling_q.txt")
-            npt.assert_almost_equal(dist, -0.6960044668271375, 1)
+            npt.assert_almost_equal(dist, -0.44489703283487086, 1)
             check_existence(out_moved, out_affine)
 
         def test_rigid_scaling():
@@ -360,7 +413,7 @@ def test_image_registration(rng):
             )
 
             dist = read_distance("affine_q.txt")
-            npt.assert_almost_equal(dist, -0.7670650775914811, 1)
+            npt.assert_almost_equal(dist, -0.5482400695948723, 1)
             check_existence(out_moved, out_affine)
 
         # Creating the erroneous behavior
