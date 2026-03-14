@@ -21,6 +21,7 @@ from dipy.align.reslice import reslice
 from dipy.data import get_fnames
 from dipy.io.image import load_nifti, save_nifti
 from dipy.nn.utils import normalize
+from dipy.nn.deepn4 import DeepN4
 from dipy.utils.logging import logger
 from dipy.utils.optpkg import optional_package
 
@@ -306,7 +307,12 @@ def synb0_syn(
     _save_debug_volume(
         debug_dir=debug_dir, name="01_t1_input", data=T1_for_reg, affine=T1_affine
     )
-
+    logger.info("Performing N4 bias field correction on T1 image...")
+    deepn4 = DeepN4()
+    T1_n4 = deepn4.predict(T1_for_reg, T1_affine)
+    _save_debug_volume(
+        debug_dir=debug_dir, name="01a_t1_n4", data=T1_n4, affine=T1_affine
+    ) 
     _, _, mni_mask_path, mni_t1_path = get_fnames(name="mni_templates")
     mni_t1, mni_t1_affine = load_nifti(mni_t1_path)
     mni_mask, _ = load_nifti(mni_mask_path)
@@ -315,7 +321,7 @@ def synb0_syn(
     # ── Step 1: Affine T1 → MNI T1 (sparse sampling for speed) ──────────
     logger.info("Performing affine registration of T1 to MNI template...")
     T1_affine_to_template, t1_reg_affine = affine_registration(
-        T1_for_reg,
+        T1_n4,
         mni_t1,
         moving_affine=T1_affine,
         static_affine=mni_t1_affine,
