@@ -19,7 +19,8 @@ from dipy.reconst.weights_method import (
     weights_method_nlls_m_est,
     weights_method_wls_m_est,
 )
-from dipy.testing.decorators import warning_for_keywords
+from dipy.utils.deprecator import warning_for_keywords
+from dipy.utils.parallel import paramap
 
 MIN_POSITIVE_SIGNAL = 0.0001
 
@@ -697,6 +698,7 @@ def tensor_prediction(dti_params, gtab, S0):
 class TensorModel(ReconstModel):
     """Diffusion Tensor"""
 
+    @warning_for_keywords(from_version="1.12.0")
     def __init__(self, gtab, *args, fit_method="WLS", return_S0_hat=False, **kwargs):
         """A Diffusion Tensor Model.
 
@@ -868,6 +870,8 @@ class TensorModel(ReconstModel):
 
 
 class TensorFit:
+    """Stores the fit result of the Diffusion Tensor model."""
+
     @warning_for_keywords()
     def __init__(self, model, model_params, *, model_S0=None):
         """Initialize a TensorFit class instance."""
@@ -1138,7 +1142,7 @@ class TensorFit:
         .. footbibliography::
 
         """
-        odf = np.zeros((self.evals.shape[:-1] + (sphere.vertices.shape[0],)))
+        odf = np.zeros(self.evals.shape[:-1] + (sphere.vertices.shape[0],))
         if len(self.evals.shape) > 1:
             mask = np.where(
                 (self.evals[..., 0] > 0)
@@ -1294,6 +1298,9 @@ def iter_fit_tensor(*, step=1e4):
         """
 
         @functools.wraps(fit_tensor)
+        # Innermost: functools.wraps swaps in fit_tensor's signature, which has
+        # no keyword-only parameter, making the decorator above it a no-op.
+        @warning_for_keywords(from_version="1.12.0")
         def wrapped_fit_tensor(
             design_matrix, data, *args, return_S0_hat=False, step=step, **kwargs
         ):
@@ -1336,6 +1343,8 @@ def iter_fit_tensor(*, step=1e4):
                 weights = weights.reshape(-1, weights.shape[-1])
             if design_matrix.shape[-1] == 22:  # DKI
                 sz = 22
+            elif design_matrix.shape[-1] == 28:  # QTI
+                sz = 28
             else:  # DTI
                 sz = 7 if kwargs.get("return_lower_triangular", False) else 12
             dtiparams = np.empty((size, sz), dtype=np.float64)
@@ -1369,6 +1378,9 @@ def iter_fit_tensor(*, step=1e4):
             if extra:
                 for key in extra:
                     extra[key] = extra[key].reshape(shape + (-1,))
+            else:
+                # Make sure extra is None if there is no extra
+                extra = None
 
             if return_S0_hat:
                 return (
@@ -1620,7 +1632,8 @@ def _ols_fit_matrix(design_matrix):
 class _NllsHelper:
     r"""Class with member functions to return nlls error and derivative."""
 
-    def err_func(self, tensor, design_matrix, data, weights=None):
+    # scipy.optimize.leastsq calls this with args=(design_matrix, data, weights)
+    def err_func(self, tensor, design_matrix, data, weights=None):  # pep3102: ignore
         r"""
         Error function for the non-linear least-squares fit of the tensor.
 
@@ -1663,7 +1676,10 @@ class _NllsHelper:
                     self.sqrt_w = self.sqrt_w[:, None]
                 return ans
 
-    def jacobian_func(self, tensor, design_matrix, data, weights=None):
+    # scipy.optimize.leastsq calls this with args=(design_matrix, data, weights)
+    def jacobian_func(
+        self, tensor, design_matrix, data, weights=None
+    ):  # pep3102: ignore
         r"""The Jacobian is the first derivative of the error function.
 
         Parameters
@@ -1801,6 +1817,13 @@ def nlls_fit_tensor(
     -------
     nlls_params: the eigen-values and eigen-vectors of the tensor in each
         voxel.
+
+    Notes
+    -----
+    For DKI and CTI fits, if the squared mean diffusivity is zero, the
+    normalized kurtosis tensor elements are set to zero without a division
+    warning. This is a numerical convention, not a physically defined
+    kurtosis at zero diffusivity. The CTI covariance elements are retained.
     """
     tol = 1e-6
 
@@ -1813,6 +1836,9 @@ def nlls_fit_tensor(
 
     # Flatten for the iteration over voxels:
     flat_data = data.reshape((-1, data.shape[-1]))
+    weights = weights.reshape((-1, weights.shape[-1])) if weights is not None else None
+    if weights is not None:
+        assert weights.shape == flat_data.shape, "Weights shape mismatch"
 
     if init_params is None:
         # Use the OLS method parameters as the starting point for nlls
@@ -1899,7 +1925,18 @@ def nlls_fit_tensor(
             model_S0[vox] = np.exp(-this_param[-1])
         if not dti:
             md2 = evals.mean(0) ** 2
-            params[vox, 12:] = this_param[6:-1] / md2
+            if md2 > 0:
+                if npa == 27:  # DKI (12 DTI + 15 DKI)
+                    params[vox, 12:27] = this_param[6:21] / md2
+                elif npa == 48:  # CTI (12 DTI + 15 DKI + 21 CTI)
+                    params[vox, 12:27] = this_param[6:21] / md2
+                    params[vox, 27:48] = this_param[21:42]
+            else:
+                if npa == 27:
+                    params[vox, 12:27] = 0.0
+                elif npa == 48:
+                    params[vox, 12:27] = 0.0
+                    params[vox, 27:48] = this_param[21:42]
 
     if resort_to_OLS:
         warnings.warn(ols_resort_msg, UserWarning, stacklevel=2)
@@ -1912,9 +1949,9 @@ def nlls_fit_tensor(
     if return_lower_triangular:
         return flat_params, leverages
 
-    params.shape = data.shape[:-1] + (npa,)
+    params = params.reshape(data.shape[:-1] + (npa,))
     if return_S0_hat:
-        model_S0.shape = data.shape[:-1] + (1,)
+        model_S0 = model_S0.reshape(data.shape[:-1] + (1,))
         return [params, model_S0], None
     else:
         return params, None
@@ -2116,10 +2153,10 @@ def restore_fit_tensor(
     if resort_to_OLS:
         warnings.warn(ols_resort_msg, UserWarning, stacklevel=2)
 
-    params.shape = data.shape[:-1] + (npa,)
+    params = params.reshape(data.shape[:-1] + (npa,))
     extra = {"robust": robust}
     if return_S0_hat:
-        model_S0.shape = data.shape[:-1] + (1,)
+        model_S0 = model_S0.reshape(data.shape[:-1] + (1,))
         return [params, model_S0], extra
     else:
         return params, extra
@@ -2186,6 +2223,7 @@ def iterative_fit_tensor(
     # Detect if number of parameters corresponds to dti
     npa = p + 5
     dti = npa == 12
+    qti = p == 28
 
     w, robust = None, None  # w = None means wls_fit_tensor uses WLS weights
     D, extra, leverages = None, None, None  # initialize, for clarity
@@ -2221,11 +2259,15 @@ def iterative_fit_tensor(
             if rdx == 1:  # for NLLS, leverages from OLS, so they never change
                 leverages = extra["leverages"]
 
+    if qti:
+        extra = {"robust": robust}
+        return D, extra
+
     # Convert diffusion tensor parameters to the evals and the evecs:
     evals, evecs = decompose_tensor(
         from_lower_triangular(D[:, :6]), min_diffusivity=tol / -design_matrix.min()
     )
-    params = np.empty((data.shape[0:-1] + (npa,)))
+    params = np.empty(data.shape[0:-1] + (npa,))
     params[:, :3] = evals
     params[:, 3:12] = evecs.reshape(params.shape[0:-1] + (-1,))
 
@@ -2237,7 +2279,7 @@ def iterative_fit_tensor(
 
     extra = {"robust": robust}
     if return_S0_hat:
-        model_S0.shape = data.shape[:-1] + (1,)
+        model_S0 = model_S0.reshape(data.shape[:-1] + (1,))
         return [params, model_S0], extra
     else:
         return params, extra
@@ -2367,11 +2409,14 @@ def lower_triangular(tensor, *, b0=None):
         raise ValueError("Diffusion tensors should be (..., 3, 3)")
     if b0 is None:
         return tensor[..., _lt_rows, _lt_cols]
-    else:
-        D = np.empty(tensor.shape[:-2] + (7,), dtype=tensor.dtype)
-        D[..., 6] = -np.log(b0)
-        D[..., :6] = tensor[..., _lt_rows, _lt_cols]
-        return D
+
+    if not isinstance(b0, (int, float, np.ndarray)):
+        raise TypeError("b0 should be a number")
+
+    D = np.empty(tensor.shape[:-2] + (7,), dtype=tensor.dtype)
+    D[..., 6] = -np.log(np.where(b0 > MIN_POSITIVE_SIGNAL, b0, MIN_POSITIVE_SIGNAL))
+    D[..., :6] = tensor[..., _lt_rows, _lt_cols]
+    return D
 
 
 @warning_for_keywords()
@@ -2472,30 +2517,61 @@ def design_matrix(gtab, *, dtype=None):
 
 
 @warning_for_keywords()
-def quantize_evecs(evecs, *, odf_vertices=None):
+def quantize_evecs(evecs, *, odf_vertices=None, idx=0, n_jobs=-1, engine="serial"):
     """Find the closest orientation of an evenly distributed sphere
 
     Parameters
     ----------
     evecs : ndarray
-        Eigenvectors.
+        Eigenvectors of shape (..., 3, n_evecs)
     odf_vertices : ndarray, optional
         If None, then set vertices from symmetric362 sphere.  Otherwise use
         passed ndarray as vertices
+    idx : int, optional
+        Use idx-th eigenvector as the primary eigenvector for fiber tracking.
+        If 0, uses the largest eigenvalue.
+    n_jobs : int, optional
+        Number of parallel jobs.
+    engine : str, optional
+        Parallel engine to use.  Choose from {"serial", "ray", "dask", "joblib"}.
+        "ray" is recommended but requires the ray library to be installed.
 
     Returns
     -------
-    IN : ndarray
-
+    ndarray
+        Indices of the closest vertices in the odf_vertices for each
+        principal eigenvector.
     """
-    max_evecs = evecs[..., :, 0]
+    if idx < 0 or idx > evecs.shape[-1] - 1:
+        raise ValueError(f"idx must be in range [0, {evecs.shape[-1] - 1}]")
+
+    if evecs.ndim < 2 or evecs.shape[-2] != 3:
+        raise ValueError(
+            "evecs must be at least 2D with second-to-last dimension of size 3"
+        )
+
+    def _find_closest_vertex(eigenvector):
+        """Helper function to find closest vertex for a single eigenvector."""
+        return np.argmax(np.dot(odf_vertices, eigenvector))
+
+    principal_eigenvectors = evecs[..., :, idx]
     if odf_vertices is None:
         odf_vertices = get_sphere(name="symmetric362").vertices
-    tup = max_evecs.shape[:-1]
-    mec = max_evecs.reshape(np.prod(np.array(tup)), 3)
-    IN = np.array([np.argmin(np.dot(odf_vertices, m)) for m in mec])
-    IN = IN.reshape(tup)
-    return IN
+
+    if evecs.ndim == 2:
+        return _find_closest_vertex(principal_eigenvectors)
+
+    original_shape = principal_eigenvectors.shape[:-1]
+    flattened_eigenvectors = principal_eigenvectors.reshape(
+        np.prod(np.array(original_shape)), 3
+    )
+
+    vertex_indices = paramap(
+        _find_closest_vertex, flattened_eigenvectors, n_jobs=n_jobs, engine=engine
+    )
+
+    vertex_indices = np.array(vertex_indices).reshape(original_shape)
+    return vertex_indices
 
 
 @warning_for_keywords()

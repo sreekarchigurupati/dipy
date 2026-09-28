@@ -1,10 +1,10 @@
 import warnings
 
-from dipy.testing.decorators import warning_for_keywords
+from dipy.utils.deprecator import warning_for_keywords
 from dipy.utils.optpkg import optional_package
 
 plt, have_plt, _ = optional_package("matplotlib.pyplot")
-fury, has_fury, _ = optional_package("fury", min_version="0.10.0")
+fury, has_fury, _ = optional_package("fury", min_version="0.10.0", max_version="1.0.0")
 if has_fury:
     from dipy.viz import actor, window
 
@@ -41,7 +41,7 @@ def show_bundles(
        Colors to be used for each bundle. If None default colors are used.
     linewidth : float, optional
         Width of each rendered streamline. Default is 0.3.
-    save_as : str, optional
+    save_as : str or Path, optional
         If not None rendered scene is stored in a png file with that name.
         Default is None.
 
@@ -96,7 +96,7 @@ def viz_two_bundles(b1, b2, fname, *, c1=(1, 0, 0), c2=(0, 1, 0), interactive=Fa
         Bundle one to be rendered.
     b2 : Streamlines
         Bundle two to be rendered.
-    fname: str
+    fname: str or Path
         Rendered scene is stored in a png file with that name.
     C1 : tuple, optional
         Color to be used for first bundle. Default red.

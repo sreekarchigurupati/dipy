@@ -6,7 +6,7 @@ import math
 import numpy as np
 import numpy.linalg as npl
 
-from dipy.testing.decorators import warning_for_keywords
+from dipy.utils.deprecator import warning_for_keywords
 
 # epsilon for testing whether a number is close to zero
 _EPS = np.finfo(float).eps * 4.0
@@ -147,8 +147,8 @@ def cart2sphere(x, y, z):
 
     """
     r = np.sqrt(x * x + y * y + z * z)
-    cos = np.divide(z, r, where=r > 0)
-    theta = np.arccos(cos, where=(cos >= -1) & (cos <= 1))
+    cos = np.divide(z, r, where=r > 0, out=None)
+    theta = np.arccos(cos, where=(cos >= -1) & (cos <= 1), out=None)
     theta = np.where(r > 0, theta, 0.0)
     phi = np.arctan2(y, x)
     r, theta, phi = np.broadcast_arrays(r, theta, phi)
@@ -420,9 +420,9 @@ def sphere_distance(pts1, pts2, *, radius=None, check_radius=True):
 
     Examples
     --------
-    >>> print('%.4f' % sphere_distance([0,1],[1,0]))
+    >>> print(f'{sphere_distance([0,1],[1,0]):.4f}')
     1.5708
-    >>> print('%.4f' % sphere_distance([0,3],[3,0]))
+    >>> print(f'{sphere_distance([0,3],[3,0]):.4f}')
     4.7124
     """
     pts1 = np.asarray(pts1)
@@ -492,7 +492,7 @@ def vector_cosine(vecs1, vecs2):
     ----------
     vecs1 : (N, R) or (R,) array_like
        N vectors (as rows) or single vector.  Vectors have R elements.
-    vecs1 : (N, R) or (R,) array_like
+    vecs2 : (N, R) or (R,) array_like
        N vectors (as rows) or single vector.  Vectors have R elements.
        It should be possible to broadcast `vecs1` against `vecs2`
 
@@ -1034,7 +1034,7 @@ def perpendicular_directions(v, *, num=30, half=False):
     For more details on this calculation, see
     `here <https://gsoc2015dipydki.blogspot.com/2015/07/rnh-post-8-computing-perpendicular.html>`_.
 
-    """  # noqa: E501
+    """
     v = np.array(v, dtype=float)
 
     # Float error used for floats comparison
@@ -1116,7 +1116,7 @@ def is_hemispherical(vecs):
     ----------
     https://rstudio-pubs-static.s3.amazonaws.com/27121_a22e51b47c544980bad594d5e0bb2d04.html
 
-    """  # noqa: E501
+    """
     if vecs.shape[1] != 3:
         raise ValueError("Input vectors must be 3D vectors")
     if not np.allclose(1, np.linalg.norm(vecs, axis=1)):
