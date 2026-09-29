@@ -9,6 +9,7 @@ from dipy.align.imaffine import AffineMap
 from dipy.align.imwarp import DiffeomorphicMap, SymmetricDiffeomorphicRegistration
 from dipy.align.metrics import CCMetric, EMMetric, MIMetric, SSDMetric
 from dipy.align.reslice import reslice
+from dipy.align.sdc import fieldmapless_sdc
 from dipy.align.streamlinear import slr_with_qbx
 from dipy.align.streamwarp import bundlewarp
 from dipy.core.gradients import (
@@ -1240,3 +1241,124 @@ class BundleWarpFlow(Workflow):
 
         logger.info(f"Saving output file {out_matched_pairs}")
         np.save(Path(out_dir) / out_matched_pairs, mp)
+
+
+class FieldmaplessSDCFlow(Workflow):
+    """Fieldmap-less susceptibility distortion correction of a DWI series.
+
+    Estimates the phase-encoding displacement of the mean b0 from an
+    undistorted anatomical image (e.g. a skull-stripped T1w) and applies it,
+    with Jacobian intensity modulation, to every volume.
+    """
+
+    @classmethod
+    def get_short_name(cls):
+        return "fieldmapless_sdc"
+
+    def run(
+        self,
+        input_files,
+        bvalues_files,
+        bvectors_files,
+        anat_files,
+        pe_direction="j-",
+        total_readout=0.0,
+        anat_mask=None,
+        prior_fieldmap=None,
+        b0_threshold=50,
+        no_dwi=False,
+        no_jacobian=False,
+        out_dir="",
+        out_corrected="dwi_sdc.nii.gz",
+        out_b0="b0_sdc.nii.gz",
+        out_displacement="sdc_displacement.nii.gz",
+        out_fieldmap="sdc_fieldmap_hz.nii.gz",
+    ):
+        """
+        Parameters
+        ----------
+        input_files : string or Path
+            Path to the (motion-corrected) DWI series. This path may contain
+            wildcards to process multiple inputs at once.
+        bvalues_files : string or Path
+            Path to the b-values files.
+        bvectors_files : string or Path
+            Path to the b-vectors files.
+        anat_files : string or Path
+            Path to the undistorted anatomical images (skull-stripped T1w).
+        pe_direction : string, optional
+            Phase-encoding direction in voxel axes, BIDS style: one of
+            ``i``, ``i-``, ``j``, ``j-``, ``k``, ``k-``.
+        total_readout : float, optional
+            Total readout time in seconds. Needed for ``prior_fieldmap`` and
+            to save the field map in Hz; 0 means unknown.
+        anat_mask : string or Path, optional
+            Brain mask on the anatomical grid. Defaults to ``anat > 0``.
+        prior_fieldmap : string or Path, optional
+            Expected field map in Hz on the anatomical grid, used as
+            initialization and regularization target. Requires total_readout.
+        b0_threshold : float, optional
+            Threshold used to find b0 volumes.
+        no_dwi : bool, optional
+            Do not use the mean diffusion-weighted image of the lowest shell
+            as an additional similarity channel.
+        no_jacobian : bool, optional
+            Do not apply Jacobian intensity modulation.
+        out_dir : string or Path, optional
+            Output directory.
+        out_corrected : string, optional
+            Name of the corrected DWI series.
+        out_b0 : string, optional
+            Name of the corrected mean b0.
+        out_displacement : string, optional
+            Name of the displacement map (voxels along the PE axis).
+        out_fieldmap : string, optional
+            Name of the field map in Hz (written if total_readout is given).
+        """
+        axes = {"i": 0, "j": 1, "k": 2}
+        if pe_direction[:1] not in axes or pe_direction[1:] not in ("", "-"):
+            raise ValueError(f"Invalid pe_direction {pe_direction!r}.")
+        pe_axis = axes[pe_direction[0]]
+        pe_sign = -1 if pe_direction.endswith("-") else 1
+        readout = total_readout if total_readout and total_readout > 0 else None
+
+        io_it = self.get_io_iterator()
+        for dwi, bval, bvec, anat_file, ocor, ob0, odisp, ofmap in io_it:
+            logger.info(f"Loading {dwi}")
+            data, affine = load_nifti(dwi)
+            bvals, _ = read_bvals_bvecs(bval, bvec)
+            b0s = bvals <= b0_threshold
+            if not np.any(b0s):
+                raise ValueError("No b0 volume found; check b0_threshold.")
+            b0 = data[..., b0s].mean(axis=-1)
+            extra = None
+            if not no_dwi and np.any(~b0s):
+                shells = np.unique(np.round(bvals[~b0s], -2))
+                low = np.abs(np.round(bvals, -2) - shells[0]) < 1
+                extra = [data[..., low & ~b0s].mean(axis=-1)]
+            anat, anat_affine = load_nifti(anat_file)
+            mask = None
+            if anat_mask:
+                mask = load_nifti(anat_mask)[0] > 0
+            prior = None
+            if prior_fieldmap:
+                prior = load_nifti(prior_fieldmap)[0]
+            res = fieldmapless_sdc(
+                b0,
+                affine,
+                anat,
+                anat_affine,
+                pe_axis=pe_axis,
+                pe_sign=pe_sign,
+                anat_mask=mask,
+                epi_extra=extra,
+                readout_time=readout,
+                prior_fieldmap=prior,
+                jacobian=not no_jacobian,
+            )
+            save_nifti(ocor, res.apply(data).astype(np.float32), affine)
+            save_nifti(ob0, res.corrected.astype(np.float32), affine)
+            save_nifti(odisp, res.displacement.astype(np.float32), affine)
+            logger.info(f"Corrected DWI saved as {ocor}")
+            if res.fieldmap_hz is not None:
+                save_nifti(ofmap, res.fieldmap_hz.astype(np.float32), affine)

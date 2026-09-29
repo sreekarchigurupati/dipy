@@ -20,6 +20,7 @@ from dipy.utils.optpkg import optional_package
 from dipy.workflows.align import (
     ApplyTransformFlow,
     BundleWarpFlow,
+    FieldmaplessSDCFlow,
     ImageRegistrationFlow,
     MotionCorrectionFlow,
     ResliceFlow,
@@ -979,3 +980,49 @@ def test_bundlewarp_flow(tmp_path):
 
     assert out_linearly_moved.exists()
     assert out_nonlinearly_moved.exists()
+
+
+def test_fieldmapless_sdc_flow(tmp_path):
+    from dipy.align.tests.test_sdc import _distort, _phantom
+
+    t1, b0, brain, g = _phantom(shape=(32, 36, 28))
+    u = 2.0 * np.exp(-((g[0] - 0.1) ** 2 + (g[1] + 0.5) ** 2 + g[2] ** 2) / 0.2)
+    b0_epi = _distort(b0, u, 1)
+    dwi_epi = _distort(np.where(brain, 0.4, 0.02) + 0.3 * (t1 > 0.7), u, 1)
+    data = np.stack([b0_epi, b0_epi, dwi_epi, dwi_epi], axis=-1) * 1000
+    affine = np.diag([2.0, 2.0, 2.0, 1.0])
+    save_nifti(tmp_path / "dwi.nii.gz", data.astype(np.float32), affine)
+    save_nifti(tmp_path / "t1.nii.gz", t1.astype(np.float32), affine)
+    np.savetxt(tmp_path / "bvals.txt", [0, 0, 1000, 1000])
+    np.savetxt(
+        tmp_path / "bvecs.txt", np.array([[0, 0, 0], [0, 0, 0], [1, 0, 0], [0, 1, 0]]).T
+    )
+
+    flow = FieldmaplessSDCFlow()
+    flow._force_overwrite = True
+    flow.run(
+        str(tmp_path / "dwi.nii.gz"),
+        str(tmp_path / "bvals.txt"),
+        str(tmp_path / "bvecs.txt"),
+        str(tmp_path / "t1.nii.gz"),
+        pe_direction="j",
+        total_readout=0.05,
+        out_dir=tmp_path,
+    )
+    out = flow.last_generated_outputs
+    corrected = load_nifti_data(out["out_corrected"])
+    npt.assert_equal(corrected.shape, data.shape)
+    disp = load_nifti_data(out["out_displacement"])
+    npt.assert_allclose(load_nifti_data(out["out_fieldmap"]), disp / 0.05, rtol=1e-5)
+    r0 = np.corrcoef(b0_epi[brain], b0[brain])[0, 1]
+    r1 = np.corrcoef(corrected[..., 0][brain], b0[brain])[0, 1]
+    npt.assert_(r1 > r0)
+    with npt.assert_raises(ValueError):
+        FieldmaplessSDCFlow().run(
+            str(tmp_path / "dwi.nii.gz"),
+            str(tmp_path / "bvals.txt"),
+            str(tmp_path / "bvecs.txt"),
+            str(tmp_path / "t1.nii.gz"),
+            pe_direction="y",
+            out_dir=tmp_path,
+        )
